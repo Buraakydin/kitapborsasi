@@ -1,0 +1,453 @@
+import React, { useState, useEffect, useCallback } from 'react';
+import { initializeApp } from 'firebase/app';
+import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from 'firebase/auth';
+import { 
+  getFirestore, 
+  collection, 
+  query, 
+  where, 
+  orderBy, 
+  onSnapshot, 
+  addDoc, 
+  serverTimestamp 
+} from 'firebase/firestore';
+import { BookOpen, MapPin, Search, Plus, User, Loader2 } from 'lucide-react';
+
+// Firebase global değişkenlerini kontrol etme ve alma
+const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : null;
+const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-university-book-app';
+
+// Mock Üniversite Listesi (Örnek veriler)
+const MOCK_UNIVERSITIES = [
+  'Tüm Üniversiteler',
+  'Boğaziçi Üniversitesi',
+  'İstanbul Teknik Üniversitesi',
+  'Orta Doğu Teknik Üniversitesi',
+  'Ege Üniversitesi',
+];
+
+// Ana Uygulama Bileşeni
+const App = () => {
+  const [db, setDb] = useState(null);
+  const [auth, setAuth] = useState(null);
+  const [userId, setUserId] = useState(null);
+  const [isAuthReady, setIsAuthReady] = useState(false);
+  
+  const [listings, setListings] = useState([]);
+  const [view, setView] = useState('listings'); // 'listings', 'add', 'profile'
+  const [filterUniversity, setFilterUniversity] = useState(MOCK_UNIVERSITIES[0]);
+  const [isLoading, setIsLoading] = useState(true);
+  const [error, setError] = useState(null);
+
+  // 1. Firebase Başlatma ve Kimlik Doğrulama
+  useEffect(() => {
+    if (!firebaseConfig) {
+      setError("Firebase yapılandırması bulunamadı. Uygulama başlatılamıyor.");
+      setIsLoading(false);
+      return;
+    }
+
+    try {
+      const app = initializeApp(firebaseConfig);
+      const firestore = getFirestore(app);
+      const userAuth = getAuth(app);
+      
+      setDb(firestore);
+      setAuth(userAuth);
+
+      const unsubscribe = onAuthStateChanged(userAuth, async (user) => {
+        if (!user) {
+          // Kullanıcı yoksa anonim olarak oturum açmayı dene
+          console.log("Kullanıcı yok. Anonim olarak oturum açılıyor...");
+          if (initialAuthToken) {
+            await signInWithCustomToken(userAuth, initialAuthToken);
+          } else {
+            await signInAnonymously(userAuth);
+          }
+        }
+        setUserId(userAuth.currentUser?.uid || 'anonymous');
+        setIsAuthReady(true);
+        setIsLoading(false);
+      });
+
+      return () => unsubscribe();
+    } catch (e) {
+      console.error("Firebase başlatma hatası:", e);
+      setError("Uygulama başlatılırken bir hata oluştu.");
+      setIsLoading(false);
+    }
+  }, []);
+
+  // 2. Gerçek Zamanlı İlanları Çekme (onSnapshot)
+  useEffect(() => {
+    // Auth ve DB hazır olana kadar bekle
+    if (!isAuthReady || !db) return;
+
+    // İlanların depolandığı koleksiyon yolu (Herkese Açık Veri)
+    const collectionPath = `/artifacts/${appId}/public/data/book_listings`;
+    const listingsCollection = collection(db, collectionPath);
+    
+    let q;
+    
+    if (filterUniversity === MOCK_UNIVERSITIES[0]) {
+      // 'Tüm Üniversiteler' seçiliyse tüm ilanları getir
+      q = query(listingsCollection, orderBy('createdAt', 'desc'));
+    } else {
+      // Belirli bir üniversiteye göre filtrele
+      q = query(
+        listingsCollection,
+        where('university', '==', filterUniversity),
+        orderBy('createdAt', 'desc')
+      );
+    }
+
+    setIsLoading(true);
+
+    const unsubscribe = onSnapshot(q, (snapshot) => {
+      const booksData = snapshot.docs.map(doc => ({
+        id: doc.id,
+        ...doc.data(),
+        // Firestore Timestamp'i okunabilir hale getir
+        createdAt: doc.data().createdAt?.toDate().toLocaleDateString('tr-TR') || 'Bilinmiyor'
+      }));
+      setListings(booksData);
+      setIsLoading(false);
+    }, (err) => {
+      console.error("Veri çekme hatası:", err);
+      setError("İlanlar yüklenirken bir hata oluştu.");
+      setIsLoading(false);
+    });
+
+    // Temizleme fonksiyonu
+    return () => unsubscribe();
+  }, [isAuthReady, db, filterUniversity]); // Bağımlılıklar: Auth hazır olduğunda ve filtre değiştiğinde çalış
+
+  // Başlık (Header) Bileşeni
+  const Header = () => (
+    <div className="bg-white shadow-md sticky top-0 z-10">
+      <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-4 flex justify-between items-center">
+        <div className="flex items-center space-x-2 cursor-pointer" onClick={() => setView('listings')}>
+          <BookOpen className="w-8 h-8 text-indigo-600" />
+          <h1 className="text-2xl font-bold text-gray-900 hidden sm:block">
+            Üniversite Kitap Borsası
+          </h1>
+        </div>
+        
+        <div className="flex space-x-4">
+          <button 
+            onClick={() => setView('add')}
+            className={`flex items-center px-4 py-2 rounded-full text-sm font-medium transition duration-150 ease-in-out ${view === 'add' ? 'bg-indigo-600 text-white shadow-lg' : 'text-indigo-600 border border-indigo-600 hover:bg-indigo-50'}`}
+          >
+            <Plus className="w-5 h-5 mr-2" /> İlan Ver
+          </button>
+          <button 
+            onClick={() => setView('profile')}
+            className={`flex items-center px-3 py-2 rounded-full text-sm font-medium transition duration-150 ease-in-out ${view === 'profile' ? 'bg-gray-200 text-gray-800' : 'text-gray-600 hover:bg-gray-50'}`}
+            title="Kullanıcı Bilgileri"
+          >
+            <User className="w-5 h-5" />
+            <span className='hidden md:inline ml-2'>{userId ? `ID: ${userId.substring(0, 4)}...` : 'Anonim'}</span>
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+
+  // İlan Kartı Bileşeni
+  const BookCard = ({ listing }) => (
+    <div className="bg-white rounded-xl shadow-lg hover:shadow-xl transition-shadow duration-300 overflow-hidden border border-gray-100">
+      <div className="p-5">
+        <div className="flex justify-between items-start mb-3">
+          <h3 className="text-lg font-semibold text-gray-900 line-clamp-2">{listing.title}</h3>
+          <div className={`px-3 py-1 text-xs font-medium rounded-full ml-3 whitespace-nowrap ${
+            listing.type === 'Satılık' ? 'bg-green-100 text-green-800' : 'bg-yellow-100 text-yellow-800'
+          }`}>
+            {listing.type}
+          </div>
+        </div>
+        
+        <p className="text-sm text-gray-600 mb-4">
+          <span className="font-medium text-gray-800">{listing.author}</span>
+        </p>
+
+        <div className="flex items-center space-x-4 mb-4 text-sm text-gray-500">
+          <div className="flex items-center">
+            <MapPin className="w-4 h-4 mr-1 text-indigo-500" />
+            {listing.university}
+          </div>
+          <div className="text-xs">
+            Durum: <span className="font-semibold text-gray-700">{listing.condition}</span>
+          </div>
+        </div>
+
+        <div className="mb-4">
+          <p className="text-sm text-gray-700 italic line-clamp-3">"{listing.notes || 'Satıcıdan ek not yok.'}"</p>
+        </div>
+
+        <div className="flex justify-between items-end pt-3 border-t border-gray-50">
+          <span className="text-2xl font-extrabold text-indigo-600">
+            {listing.type === 'Satılık' ? `${listing.price} ₺` : 'TAKAS'}
+          </span>
+          <button className="bg-indigo-500 text-white px-4 py-2 rounded-lg text-sm font-medium hover:bg-indigo-700 transition duration-150 shadow-md">
+            İletişime Geç
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+
+  // İlan Ekleme Formu
+  const AddListingForm = () => {
+    const [title, setTitle] = useState('');
+    const [author, setAuthor] = useState('');
+    const [university, setUniversity] = useState(MOCK_UNIVERSITIES[1]);
+    const [type, setType] = useState('Satılık'); // 'Satılık' veya 'Takaslık'
+    const [price, setPrice] = useState('');
+    const [condition, setCondition] = useState('Çok İyi');
+    const [notes, setNotes] = useState('');
+    const [isSaving, setIsSaving] = useState(false);
+    const [message, setMessage] = useState('');
+
+    const handleSubmit = async (e) => {
+      e.preventDefault();
+      if (!db || !userId) {
+        setMessage('Hata: Kimlik doğrulama tamamlanmadı.');
+        return;
+      }
+
+      if (!title || !author || university === MOCK_UNIVERSITIES[0] || (type === 'Satılık' && !price)) {
+        setMessage('Lütfen gerekli tüm alanları doldurun (Kitap Adı, Yazar, Üniversite ve Fiyat).');
+        return;
+      }
+      
+      if (type === 'Satılık' && isNaN(parseFloat(price))) {
+        setMessage('Fiyat geçerli bir sayı olmalıdır.');
+        return;
+      }
+
+      setIsSaving(true);
+      setMessage('');
+
+      const newListing = {
+        title: title.trim(),
+        author: author.trim(),
+        university,
+        type,
+        price: type === 'Satılık' ? parseFloat(price) : null,
+        condition,
+        notes: notes.trim(),
+        userId,
+        createdAt: serverTimestamp(),
+      };
+
+      try {
+        const collectionPath = `/artifacts/${appId}/public/data/book_listings`;
+        await addDoc(collection(db, collectionPath), newListing);
+        
+        setMessage('✅ İlan başarıyla eklendi! Yönlendiriliyorsunuz...');
+        setTimeout(() => {
+          setView('listings');
+          resetForm();
+        }, 1500);
+      } catch (error) {
+        console.error("İlan ekleme hatası:", error);
+        setMessage('❌ İlan eklenirken bir hata oluştu: ' + error.message);
+      } finally {
+        setIsSaving(false);
+      }
+    };
+
+    const resetForm = () => {
+      setTitle('');
+      setAuthor('');
+      setUniversity(MOCK_UNIVERSITIES[1]);
+      setType('Satılık');
+      setPrice('');
+      setCondition('Çok İyi');
+      setNotes('');
+    }
+
+    const inputClasses = "w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-indigo-500 focus:border-indigo-500 transition duration-150";
+
+    return (
+      <div className="max-w-2xl mx-auto p-6 bg-white rounded-xl shadow-2xl mt-8">
+        <h2 className="text-3xl font-bold text-gray-800 mb-6 border-b pb-3">Yeni İlan Oluştur</h2>
+        
+        <form onSubmit={handleSubmit} className="space-y-4">
+          {message && (
+            <div className={`p-3 rounded-lg text-sm ${message.startsWith('✅') ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'}`}>
+              {message}
+            </div>
+          )}
+
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">Kitap Adı</label>
+            <input type="text" value={title} onChange={(e) => setTitle(e.target.value)} className={inputClasses} placeholder="Örn: Yapay Zeka ve Algoritmalar" required />
+          </div>
+
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">Yazar Adı</label>
+            <input type="text" value={author} onChange={(e) => setAuthor(e.target.value)} className={inputClasses} placeholder="Örn: John Smith" required />
+          </div>
+
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">Üniversite</label>
+            <select value={university} onChange={(e) => setUniversity(e.target.value)} className={inputClasses} required>
+              {MOCK_UNIVERSITIES.slice(1).map(uni => (
+                <option key={uni} value={uni}>{uni}</option>
+              ))}
+            </select>
+          </div>
+          
+          <div className="flex space-x-4">
+            <div className="flex-1">
+              <label className="block text-sm font-medium text-gray-700 mb-1">Kitap Durumu</label>
+              <select value={condition} onChange={(e) => setCondition(e.target.value)} className={inputClasses} required>
+                {['Sıfır', 'Çok İyi', 'Orta', 'Eskimiş'].map(cond => (
+                  <option key={cond} value={cond}>{cond}</option>
+                ))}
+              </select>
+            </div>
+            <div className="flex-1">
+              <label className="block text-sm font-medium text-gray-700 mb-1">İlan Tipi</label>
+              <select value={type} onChange={(e) => setType(e.target.value)} className={inputClasses} required>
+                <option value="Satılık">Satılık</option>
+                <option value="Takaslık">Takaslık</option>
+              </select>
+            </div>
+          </div>
+          
+          {type === 'Satılık' && (
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">Fiyat (₺)</label>
+              <input type="number" value={price} onChange={(e) => setPrice(e.target.value)} className={inputClasses} placeholder="Örn: 150" min="0" required={type === 'Satılık'} />
+            </div>
+          )}
+
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">Satıcı Notları (Kitabın durumu vb.)</label>
+            <textarea value={notes} onChange={(e) => setNotes(e.target.value)} rows="3" className={inputClasses} placeholder="Örn: İlk 50 sayfanın altı kurşun kalemle çizili."></textarea>
+          </div>
+
+          <button 
+            type="submit"
+            disabled={isSaving || !isAuthReady}
+            className="w-full bg-indigo-600 text-white py-3 rounded-xl font-semibold text-lg hover:bg-indigo-700 transition duration-150 disabled:bg-indigo-300 flex items-center justify-center shadow-lg"
+          >
+            {isSaving ? (
+              <Loader2 className="w-5 h-5 animate-spin mr-2" />
+            ) : (
+              <Plus className="w-5 h-5 mr-2" />
+            )}
+            İlanı Yayımla
+          </button>
+        </form>
+      </div>
+    );
+  };
+
+  // İlanlar ve Filtreleme Görünümü
+  const ListingView = () => (
+    <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+      <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center mb-6 space-y-4 sm:space-y-0">
+        <h2 className="text-3xl font-extrabold text-gray-800">Kitap İlanları ({filterUniversity})</h2>
+        
+        <div className="flex items-center space-x-3 w-full sm:w-auto">
+          <MapPin className="w-5 h-5 text-indigo-600 hidden sm:block" />
+          <select 
+            value={filterUniversity} 
+            onChange={(e) => setFilterUniversity(e.target.value)}
+            className="px-4 py-2 border border-gray-300 rounded-lg shadow-sm focus:ring-indigo-500 focus:border-indigo-500 transition duration-150 text-base font-medium w-full sm:w-64"
+          >
+            {MOCK_UNIVERSITIES.map(uni => (
+              <option key={uni} value={uni}>{uni}</option>
+            ))}
+          </select>
+        </div>
+      </div>
+
+      {error && (
+        <div className="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded relative mb-4" role="alert">
+          <strong className="font-bold">Hata!</strong>
+          <span className="block sm:inline"> {error}</span>
+        </div>
+      )}
+
+      {isLoading ? (
+        <div className="flex justify-center items-center h-64">
+          <Loader2 className="w-8 h-8 animate-spin text-indigo-600 mr-3" />
+          <span className="text-lg text-gray-600">İlanlar Yükleniyor...</span>
+        </div>
+      ) : (
+        <>
+          {listings.length === 0 ? (
+            <div className="text-center p-10 bg-gray-50 rounded-xl mt-10 shadow-inner">
+              <Search className="w-10 h-10 mx-auto text-indigo-400 mb-4" />
+              <p className="text-xl font-semibold text-gray-700">Bu üniversite için henüz ilan bulunamadı.</p>
+              <p className="text-gray-500">İlk ilanı sen vermek ister misin?</p>
+              <button 
+                onClick={() => setView('add')}
+                className="mt-4 bg-indigo-500 text-white px-6 py-2 rounded-lg hover:bg-indigo-700 transition duration-150"
+              >
+                İlan Ver
+              </button>
+            </div>
+          ) : (
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-6">
+              {listings.map(listing => (
+                <BookCard key={listing.id} listing={listing} />
+              ))}
+            </div>
+          )}
+        </>
+      )}
+    </div>
+  );
+
+  // Kullanıcı Profili Görünümü
+  const ProfileView = () => (
+    <div className="max-w-xl mx-auto p-6 bg-white rounded-xl shadow-2xl mt-8">
+      <h2 className="text-3xl font-bold text-gray-800 mb-6 border-b pb-3">Kullanıcı Paneli</h2>
+      <div className="space-y-4">
+        <div className="flex items-center space-x-3 p-4 bg-indigo-50 rounded-lg">
+          <User className="w-6 h-6 text-indigo-600" />
+          <p className="text-lg font-medium text-gray-700">Oturum Durumu: <span className="font-semibold text-indigo-600">{isAuthReady ? 'Bağlı' : 'Bağlanıyor...'}</span></p>
+        </div>
+        <div className="p-4 bg-gray-50 rounded-lg border">
+          <p className="text-sm text-gray-500 mb-1">Kullanıcı ID'si (Başka kullanıcılarla paylaşılabilir):</p>
+          <p className="font-mono text-base break-all text-gray-800 p-2 bg-white rounded-md border">
+            {userId || 'Kimlik bilgisi yükleniyor...'}
+          </p>
+        </div>
+        <div className="p-4 bg-gray-50 rounded-lg border">
+          <p className="text-sm text-gray-500 mb-1">Uygulama Alanı (App ID):</p>
+          <p className="font-mono text-base break-all text-gray-800 p-2 bg-white rounded-md border">
+            {appId}
+          </p>
+        </div>
+        <p className="text-sm text-gray-600 pt-4 border-t mt-4">
+          Bu ID, ilanlarınızı yönetmek ve güvenlik kurallarına uymak için kullanılır. Tüm ilanlar herkese açık `book_listings` koleksiyonunda saklanır.
+        </p>
+      </div>
+    </div>
+  );
+
+  return (
+    <div className="min-h-screen bg-gray-50 font-sans">
+      <Header />
+      
+      <main>
+        {view === 'listings' && <ListingView />}
+        {view === 'add' && <AddListingForm />}
+        {view === 'profile' && <ProfileView />}
+      </main>
+
+      <footer className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6 text-center text-gray-500 text-sm mt-12 border-t">
+        <p>© 2024 Üniversite Kitap Borsası | Proje Versiyonu: {appId.substring(0, 8)}</p>
+      </footer>
+    </div>
+  );
+};
+
+export default App;
